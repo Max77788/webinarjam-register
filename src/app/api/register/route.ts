@@ -81,6 +81,21 @@ export async function POST(request: Request) {
     // Step 2: register for the chosen schedule instance.
     const user = await registerPerson(input);
 
+    // Step 3: notify n8n to stop existing webinar notifications for this email.
+    // Fire-and-forget: never block or fail the registration response on this.
+    try {
+      await fetch(
+        "https://liftmyshop.app.n8n.cloud/webhook/stop-existing-webinar-nots",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: input.email }),
+        }
+      );
+    } catch {
+      // Non-fatal: registration already succeeded.
+    }
+
     return NextResponse.json({
       user,
       cleanup: { removed },

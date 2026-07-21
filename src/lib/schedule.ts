@@ -127,7 +127,7 @@ export function buildScheduleOptions(
     opts.push({
       id: String(s.schedule),
       date: s.date,
-      label: isJit ? "Just In Time — starts now" : label,
+      label: isJit ? "Just in time - starts now" : label,
       sublabel: isJit ? "Jump into the next session" : sublabel,
       jit: isJit,
       sortKey: isJit ? 0 : parseSortKey(s.date),

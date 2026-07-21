@@ -263,7 +263,7 @@ export function RegistrationForm() {
             </div>
           )}
           {!loading && (
-            <div className="space-y-2">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               {scheduleOptions.map((opt) => {
                 const key = `${opt.id}|${opt.date}`;
                 return (
@@ -272,13 +272,13 @@ export function RegistrationForm() {
                     key={key}
                     onClick={() => setScheduleId(key)}
                     className={cn(
-                      "flex w-full items-center justify-between rounded-xl border-2 px-4 py-3 text-left transition",
+                      "flex h-full w-full items-center justify-between gap-3 rounded-xl border-2 px-4 py-3 text-left transition",
                       scheduleId === key
                         ? "border-brand-500 bg-brand-50"
                         : "border-slate-200 bg-white hover:border-slate-300"
                     )}
                   >
-                    <span className="flex items-center gap-3">
+                    <span className="flex min-w-0 items-center gap-3">
                       <span
                         className={cn(
                           "flex h-9 w-9 items-center justify-center rounded-lg",
@@ -293,8 +293,8 @@ export function RegistrationForm() {
                           <Clock className="h-5 w-5" />
                         )}
                       </span>
-                      <span>
-                        <span className="block text-sm font-semibold text-slate-800">
+                      <span className="min-w-0">
+                        <span className="block text-sm font-semibold leading-snug text-slate-800">
                           {opt.label}
                         </span>
                         <span className="block text-xs text-slate-500">
@@ -304,7 +304,7 @@ export function RegistrationForm() {
                     </span>
                     <span
                       className={cn(
-                        "h-4 w-4 rounded-full border-2",
+                        "h-4 w-4 shrink-0 rounded-full border-2",
                         scheduleId === key
                           ? "border-brand-500 bg-brand-500"
                           : "border-slate-300"
