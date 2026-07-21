@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
+import { randomBytes } from "crypto";
 import {
   registerPerson,
   unsubscribeByEmail,
   WebinarJamError,
   type RegisterInput,
 } from "@/lib/webinarjam";
+import { formatFinalDateTime } from "@/lib/schedule";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,6 +17,16 @@ function isNonEmpty(v: unknown): v is string {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const GMT_RE = /^GMT[+-]\d{1,2}(:\d{2})?$/;
+
+/** 20-char nanoid-style correlation id for the reminders flow. */
+function makeCorrelationId(): string {
+  const alphabet =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const bytes = randomBytes(20);
+  let out = "";
+  for (let i = 0; i < 20; i++) out += alphabet[bytes[i] % alphabet.length];
+  return out;
+}
 
 export async function POST(request: Request) {
   let payload: Record<string, unknown>;
@@ -33,6 +45,7 @@ export async function POST(request: Request) {
     schedule,
     date,
     timezone,
+    user_timezone,
   } = payload;
 
   if (!isNonEmpty(first_name) || !isNonEmpty(last_name)) {
@@ -81,15 +94,40 @@ export async function POST(request: Request) {
     // Step 2: register for the chosen schedule instance.
     const user = await registerPerson(input);
 
-    // Step 3: notify n8n to stop existing webinar notifications for this email.
+    // Step 3: kick off the n8n webinar reminders flow for this registration.
     // Fire-and-forget: never block or fail the registration response on this.
     try {
+      const finalDateSource = input.date || user.date || "";
+      const { date: finalDate, time: finalTime } =
+        formatFinalDateTime(finalDateSource);
+      const fullPhone =
+        [input.phone_country_code, input.phone]
+          .filter(Boolean)
+          .join("")
+          .replace(/\s+/g, "") || "";
+
+      const reminderPayload = {
+        user_timezone_firstItem: isNonEmpty(user_timezone)
+          ? user_timezone.trim()
+          : "",
+        user_date_firstItem: finalDateSource,
+        user_phone: fullPhone,
+        id: makeCorrelationId(),
+        RECIPIENT_EMAIL_firstItem: "",
+        RECIPIENT_EMAIL: input.email,
+        user_first_name: input.first_name,
+        FINAL_TIMEZONE: input.timezone || "",
+        FINAL_LINK: user.live_room_url,
+        FINAL_DATE: finalDate,
+        FINAL_TIME: finalTime,
+      };
+
       await fetch(
-        "https://liftmyshop.app.n8n.cloud/webhook/stop-existing-webinar-nots",
+        "https://liftmyshop.app.n8n.cloud/webhook/start-webinar-reminders-flow",
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email: input.email }),
+          body: JSON.stringify(reminderPayload),
         }
       );
     } catch {

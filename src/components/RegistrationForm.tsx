@@ -142,6 +142,7 @@ export function RegistrationForm() {
           schedule: chosen.id,
           date: chosen.date,
           timezone: gmtOffset,
+          user_timezone: timezone,
         }),
       });
       const data = await res.json();

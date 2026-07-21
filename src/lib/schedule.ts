@@ -106,6 +106,38 @@ function formatLocalized(dateStr: string): { label: string; sublabel: string } {
 }
 
 /**
+ * Format a localized "YYYY-MM-DD HH:mm" instant into the display shapes the n8n
+ * reminders flow expects: FINAL_DATE like "July 23, 2026" and FINAL_TIME like
+ * "7pm" (or "7:30pm" when there are minutes). The wall-clock is already
+ * localized, so we format the components as UTC to avoid re-shifting.
+ */
+export function formatFinalDateTime(dateStr: string): {
+  date: string;
+  time: string;
+} {
+  const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+  if (!m) return { date: dateStr, time: "" };
+  const [, y, mo, d, h, mi] = m.map(Number) as unknown as number[];
+  const dt = new Date(Date.UTC(y, mo - 1, d, h, mi));
+
+  const date = new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  }).format(dt);
+
+  const hour12 = ((h + 11) % 12) + 1;
+  const ampm = h < 12 ? "am" : "pm";
+  const time =
+    mi === 0
+      ? `${hour12}${ampm}`
+      : `${hour12}:${String(mi).padStart(2, "0")}${ampm}`;
+
+  return { date, time };
+}
+
+/**
  * Convert API schedules (already localized to the user's GMT offset) into
  * sorted UI options. The API repeats recurring schedule ids across days, so
  * each option is keyed by id+date to keep instances distinct. The "Just in
