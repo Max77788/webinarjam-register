@@ -1,26 +1,39 @@
 /**
- * Server-side WebinarJam API client.
+ * Server-side EverWebinar API client.
  *
  * All calls run on the server so the API key is never exposed to the browser.
- * The endpoint shapes below were verified against the live WebinarJam API:
+ * The endpoint shapes below were verified against the live EverWebinar API:
  *
- *   POST /webinarjam/webinar      -> webinar details incl. schedules[]
- *   POST /webinarjam/register     -> registers a person, returns user.live_room_url
- *   POST /webinarjam/registrants  -> paginated list, used to map email -> lead_id
- *   POST /webinarjam/unsubscribe  -> requires lead_id (NOT email); returns HTTP 204
+ *   POST /everwebinar/webinar      -> webinar details incl. schedules[]
+ *   POST /everwebinar/register     -> registers a person, returns user.live_room_url
+ *   POST /everwebinar/registrants  -> paginated list, used to map email -> lead_id
+ *   POST /everwebinar/unsubscribe  -> requires lead_id (NOT email); returns HTTP 204
  *
- * WebinarJam expects application/x-www-form-urlencoded bodies.
+ * EverWebinar expects application/x-www-form-urlencoded bodies and the api_key
+ * as a query-string parameter (httpQueryAuth). Both are handled below.
+ *
+ * KEY BEHAVIOUR: when you pass `timezone` as a GMT offset (e.g. "GMT+2",
+ * "GMT+5:30") to /webinar, the API returns every schedule date already
+ * localized to that offset AND injects a synthetic "Just in time" slot
+ * (schedule id 5) whose date is the next imminent start. So the client does
+ * NOT compute timezones or JIT itself — the API does both.
  */
 
-const API_BASE = "https://api.webinarjam.com/webinarjam";
+const API_BASE = "https://api.webinarjam.com/everwebinar";
 
 export type WebinarSchedule = {
   /** schedule_id used when registering */
   schedule: number;
-  /** e.g. "2026-07-20 22:23" (in the webinar's own timezone) */
+  /** e.g. "2026-07-22 19:00" — localized to the requested GMT offset */
   date: string;
-  /** e.g. "Right now" */
+  /** e.g. "Every day, 10:00 AM" or "Just in time" */
   comment: string;
+};
+
+export type WebinarPresenter = {
+  name: string;
+  email: string;
+  picture: string;
 };
 
 export type WebinarDetails = {
@@ -29,9 +42,9 @@ export type WebinarDetails = {
   name: string;
   title: string;
   description: string;
-  type: string;
   schedules: WebinarSchedule[];
   timezone: string;
+  presenters?: WebinarPresenter[];
   registration_url?: string;
 };
 
@@ -75,7 +88,7 @@ export function getWebinarId(): string {
   return process.env.WEBINARJAM_WEBINAR_ID || "2";
 }
 
-/** Extract a human-readable message from WebinarJam's error payloads. */
+/** Extract a human-readable message from EverWebinar's error payloads. */
 function extractError(payload: unknown): string {
   if (payload && typeof payload === "object") {
     const errors = (payload as Record<string, unknown>).errors;
@@ -88,21 +101,26 @@ function extractError(payload: unknown): string {
       if (Array.isArray(first) && typeof first[0] === "string") return first[0];
     }
   }
-  return "WebinarJam request failed.";
+  return "EverWebinar request failed.";
 }
 
 async function post<T>(path: string, params: Record<string, string>): Promise<T> {
-  const body = new URLSearchParams(params).toString();
+  // api_key travels in the query string (httpQueryAuth); everything else in
+  // the form-urlencoded body.
+  const { api_key, ...rest } = params;
+  const url = `${API_BASE}/${path}?api_key=${encodeURIComponent(api_key)}`;
+  const body = new URLSearchParams(rest).toString();
+
   let res: Response;
   try {
-    res = await fetch(`${API_BASE}/${path}`, {
+    res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
       cache: "no-store",
     });
   } catch {
-    throw new WebinarJamError("Could not reach WebinarJam.", 502);
+    throw new WebinarJamError("Could not reach EverWebinar.", 502);
   }
 
   // Unsubscribe returns 204 with an empty body.
@@ -115,7 +133,7 @@ async function post<T>(path: string, params: Record<string, string>): Promise<T>
   try {
     json = text ? JSON.parse(text) : null;
   } catch {
-    throw new WebinarJamError("WebinarJam returned a non-JSON response.", 502);
+    throw new WebinarJamError("EverWebinar returned a non-JSON response.", 502);
   }
 
   if (!res.ok || (json as Record<string, unknown>)?.status === "error") {
@@ -125,11 +143,23 @@ async function post<T>(path: string, params: Record<string, string>): Promise<T>
   return json as T;
 }
 
-export async function getWebinarDetails(): Promise<WebinarDetails> {
-  const data = await post<{ status: string; webinar: WebinarDetails }>("webinar", {
+/**
+ * Fetch webinar details. When `gmtOffset` (e.g. "GMT+2") is supplied, the API
+ * localizes all schedule dates to it and adds the native "Just in time" slot.
+ */
+export async function getWebinarDetails(
+  gmtOffset?: string
+): Promise<WebinarDetails> {
+  const params: Record<string, string> = {
     api_key: getApiKey(),
     webinar_id: getWebinarId(),
-  });
+  };
+  if (gmtOffset) params.timezone = gmtOffset;
+
+  const data = await post<{ status: string; webinar: WebinarDetails }>(
+    "webinar",
+    params
+  );
   return data.webinar;
 }
 
@@ -138,7 +168,7 @@ export type Registrant = {
   lead_id: number;
   email: string;
   schedule_id: number;
-  subscribed: string;
+  subscribed?: string;
 };
 
 /** Fetch every registrant across all pages (used to resolve email -> lead_id). */
@@ -171,7 +201,7 @@ export async function listRegistrants(): Promise<Registrant[]> {
 
 /**
  * Remove a registrant from every schedule of the target webinar, matched by
- * email. WebinarJam's unsubscribe endpoint keys on lead_id, so we resolve the
+ * email. EverWebinar's unsubscribe endpoint keys on lead_id, so we resolve the
  * ids first. Safe to call for emails that were never registered.
  */
 export async function unsubscribeByEmail(email: string): Promise<number> {
@@ -204,6 +234,9 @@ export type RegisterInput = {
   phone_country_code?: string;
   phone?: string;
   schedule: string;
+  /** localized date string of the chosen instance, e.g. "2026-07-22 19:00" */
+  date?: string;
+  /** GMT offset for the chosen instant, e.g. "GMT+2" */
   timezone?: string;
 };
 
@@ -218,6 +251,7 @@ export async function registerPerson(input: RegisterInput): Promise<RegisteredUs
   };
   if (input.phone_country_code) params.phone_country_code = input.phone_country_code;
   if (input.phone) params.phone = input.phone;
+  if (input.date) params.date = input.date;
   if (input.timezone) params.timezone = input.timezone;
 
   const data = await post<{ status: string; user: RegisteredUser }>("register", params);

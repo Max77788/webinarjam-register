@@ -14,6 +14,7 @@ function isNonEmpty(v: unknown): v is string {
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const GMT_RE = /^GMT[+-]\d{1,2}(:\d{2})?$/;
 
 export async function POST(request: Request) {
   let payload: Record<string, unknown>;
@@ -23,8 +24,16 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
   }
 
-  const { first_name, last_name, email, phone_country_code, phone, schedule, timezone } =
-    payload;
+  const {
+    first_name,
+    last_name,
+    email,
+    phone_country_code,
+    phone,
+    schedule,
+    date,
+    timezone,
+  } = payload;
 
   if (!isNonEmpty(first_name) || !isNonEmpty(last_name)) {
     return NextResponse.json(
@@ -54,7 +63,10 @@ export async function POST(request: Request) {
       ? phone_country_code.trim()
       : undefined,
     phone: isNonEmpty(phone) ? phone.trim() : undefined,
-    timezone: isNonEmpty(timezone) ? timezone.trim() : undefined,
+    date: isNonEmpty(date) ? date.trim() : undefined,
+    timezone: isNonEmpty(timezone) && GMT_RE.test(timezone.trim())
+      ? timezone.trim()
+      : undefined,
   };
 
   try {
@@ -66,7 +78,7 @@ export async function POST(request: Request) {
       // Non-fatal: proceed with registration even if cleanup fails.
     }
 
-    // Step 2: register for the chosen schedule.
+    // Step 2: register for the chosen schedule instance.
     const user = await registerPerson(input);
 
     return NextResponse.json({

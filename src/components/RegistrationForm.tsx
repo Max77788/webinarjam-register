@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   CalendarClock,
   Clock,
@@ -15,8 +15,8 @@ import { useToast } from "@/components/Toast";
 import { SuccessCard } from "@/components/SuccessCard";
 import { COUNTRY_CODES } from "@/lib/countryCodes";
 import {
-  buildJitOption,
   buildScheduleOptions,
+  gmtOffsetForTz,
   COMMON_TIMEZONES,
   type ScheduleOption,
 } from "@/lib/schedule";
@@ -44,7 +44,7 @@ export function RegistrationForm() {
   const [countryCode, setCountryCode] = useState("+1");
   const [phone, setPhone] = useState("");
   const [timezone, setTimezone] = useState<string>("UTC");
-  const [scheduleId, setScheduleId] = useState<string>("jit");
+  const [scheduleId, setScheduleId] = useState<string>("");
 
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<RegisteredUser | null>(null);
@@ -54,25 +54,40 @@ export function RegistrationForm() {
     setTimezone(detectTimezone());
   }, []);
 
-  // Fetch webinar details once.
+  // The GMT offset (e.g. "GMT+2") EverWebinar uses to localize schedules + JIT.
+  const gmtOffset = useMemo(() => gmtOffsetForTz(timezone), [timezone]);
+
+  // Fetch webinar details localized to the chosen timezone. Refetches whenever
+  // the offset changes so the API re-localizes dates and the JIT slot.
+  const loadWebinar = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const res = await fetch(
+        `/api/webinar?gmt=${encodeURIComponent(gmtOffset)}`,
+        { cache: "no-store" }
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to load webinar.");
+      return data.webinar as WebinarDetails;
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Failed to load.");
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  }, [gmtOffset]);
+
   useEffect(() => {
     let active = true;
     (async () => {
-      try {
-        const res = await fetch("/api/webinar", { cache: "no-store" });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Failed to load webinar.");
-        if (active) setWebinar(data.webinar);
-      } catch (err) {
-        if (active) setLoadError(err instanceof Error ? err.message : "Failed to load.");
-      } finally {
-        if (active) setLoading(false);
-      }
+      const w = await loadWebinar();
+      if (active && w) setWebinar(w);
     })();
     return () => {
       active = false;
     };
-  }, []);
+  }, [loadWebinar]);
 
   // Timezone dropdown list: user's detected zone always present.
   const timezoneList = useMemo(() => {
@@ -81,17 +96,20 @@ export function RegistrationForm() {
     return Array.from(set);
   }, []);
 
-  // Build the schedule options (JIT + real), localized to the chosen timezone.
+  // Build options from the already-localized schedules the API returned.
   const scheduleOptions: ScheduleOption[] = useMemo(() => {
-    const jit = buildJitOption(timezone);
-    if (!webinar) return [jit];
-    const real = buildScheduleOptions(
-      webinar.schedules || [],
-      webinar.timezone || "UTC",
-      timezone
+    if (!webinar) return [];
+    return buildScheduleOptions(webinar.schedules || []);
+  }, [webinar]);
+
+  // Keep a valid selection: default to the first option (JIT sorts first).
+  useEffect(() => {
+    if (scheduleOptions.length === 0) return;
+    const stillValid = scheduleOptions.some(
+      (o) => `${o.id}|${o.date}` === scheduleId
     );
-    return [jit, ...real];
-  }, [webinar, timezone]);
+    if (!stillValid) setScheduleId(`${scheduleOptions[0].id}|${scheduleOptions[0].date}`);
+  }, [scheduleOptions, scheduleId]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -102,12 +120,12 @@ export function RegistrationForm() {
       return;
     }
 
-    // A synthetic JIT slot has no real schedule id; fall back to the first
-    // real schedule so WebinarJam accepts the registration.
-    let outgoingSchedule = scheduleId;
-    if (scheduleId === "jit") {
-      const firstReal = scheduleOptions.find((o) => !o.jit);
-      outgoingSchedule = firstReal ? firstReal.id : "1";
+    const chosen = scheduleOptions.find(
+      (o) => `${o.id}|${o.date}` === scheduleId
+    );
+    if (!chosen) {
+      toast("Please select a session.", "error");
+      return;
     }
 
     setSubmitting(true);
@@ -121,8 +139,9 @@ export function RegistrationForm() {
           email,
           phone_country_code: countryCode,
           phone,
-          schedule: outgoingSchedule,
-          timezone,
+          schedule: chosen.id,
+          date: chosen.date,
+          timezone: gmtOffset,
         }),
       });
       const data = await res.json();
@@ -144,7 +163,9 @@ export function RegistrationForm() {
     <div className="animate-fade-in">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-slate-900">
-          {loading ? "Loading session…" : webinar?.title || "Reserve your seat"}
+          {loading && !webinar
+            ? "Loading session…"
+            : webinar?.title || "Reserve your seat"}
         </h1>
         <p className="mt-1 text-sm text-slate-500">
           {webinar?.description ||
@@ -224,7 +245,7 @@ export function RegistrationForm() {
           >
             {timezoneList.map((tz) => (
               <option key={tz} value={tz}>
-                {tz.replace(/_/g, " ")}
+                {tz.replace(/_/g, " ")} ({gmtOffsetForTz(tz)})
               </option>
             ))}
           </select>
@@ -235,54 +256,65 @@ export function RegistrationForm() {
             <CalendarClock className="h-4 w-4" />
             Choose a session
           </label>
-          <div className="space-y-2">
-            {scheduleOptions.map((opt) => (
-              <button
-                type="button"
-                key={opt.id}
-                onClick={() => setScheduleId(opt.id)}
-                className={cn(
-                  "flex w-full items-center justify-between rounded-xl border-2 px-4 py-3 text-left transition",
-                  scheduleId === opt.id
-                    ? "border-brand-500 bg-brand-50"
-                    : "border-slate-200 bg-white hover:border-slate-300"
-                )}
-              >
-                <span className="flex items-center gap-3">
-                  <span
+          {loading && (
+            <div className="flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-500">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Updating times for {gmtOffset}…
+            </div>
+          )}
+          {!loading && (
+            <div className="space-y-2">
+              {scheduleOptions.map((opt) => {
+                const key = `${opt.id}|${opt.date}`;
+                return (
+                  <button
+                    type="button"
+                    key={key}
+                    onClick={() => setScheduleId(key)}
                     className={cn(
-                      "flex h-9 w-9 items-center justify-center rounded-lg",
-                      opt.jit
-                        ? "bg-amber-100 text-amber-600"
-                        : "bg-brand-100 text-brand-600"
+                      "flex w-full items-center justify-between rounded-xl border-2 px-4 py-3 text-left transition",
+                      scheduleId === key
+                        ? "border-brand-500 bg-brand-50"
+                        : "border-slate-200 bg-white hover:border-slate-300"
                     )}
                   >
-                    {opt.jit ? (
-                      <Zap className="h-5 w-5" />
-                    ) : (
-                      <Clock className="h-5 w-5" />
-                    )}
-                  </span>
-                  <span>
-                    <span className="block text-sm font-semibold text-slate-800">
-                      {opt.label}
+                    <span className="flex items-center gap-3">
+                      <span
+                        className={cn(
+                          "flex h-9 w-9 items-center justify-center rounded-lg",
+                          opt.jit
+                            ? "bg-amber-100 text-amber-600"
+                            : "bg-brand-100 text-brand-600"
+                        )}
+                      >
+                        {opt.jit ? (
+                          <Zap className="h-5 w-5" />
+                        ) : (
+                          <Clock className="h-5 w-5" />
+                        )}
+                      </span>
+                      <span>
+                        <span className="block text-sm font-semibold text-slate-800">
+                          {opt.label}
+                        </span>
+                        <span className="block text-xs text-slate-500">
+                          {opt.sublabel}
+                        </span>
+                      </span>
                     </span>
-                    <span className="block text-xs text-slate-500">
-                      {opt.sublabel}
-                    </span>
-                  </span>
-                </span>
-                <span
-                  className={cn(
-                    "h-4 w-4 rounded-full border-2",
-                    scheduleId === opt.id
-                      ? "border-brand-500 bg-brand-500"
-                      : "border-slate-300"
-                  )}
-                />
-              </button>
-            ))}
-          </div>
+                    <span
+                      className={cn(
+                        "h-4 w-4 rounded-full border-2",
+                        scheduleId === key
+                          ? "border-brand-500 bg-brand-500"
+                          : "border-slate-300"
+                      )}
+                    />
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         <button

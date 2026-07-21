@@ -1,42 +1,43 @@
 import type { WebinarSchedule } from "@/lib/webinarjam";
 
 /**
- * A schedule option ready to render in the UI. Either a real WebinarJam
- * schedule or the synthetic "Just In Time" slot.
+ * A schedule option ready to render in the UI. Every option is a real
+ * EverWebinar schedule instance — including the API-native "Just in time"
+ * slot (schedule id 5). No synthetic client-side slots.
  */
 export type ScheduleOption = {
   /** value sent back as `schedule` on registration */
   id: string;
-  /** primary label, e.g. "Fri, Jul 24, 2026" */
+  /** the localized date string for this instance, e.g. "2026-07-22 19:00" */
+  date: string;
+  /** primary label, e.g. "Wed, Jul 22, 2026" */
   label: string;
-  /** secondary label, e.g. "2:30 PM GMT+2" */
+  /** secondary label, e.g. "7:00 PM" */
   sublabel: string;
-  /** true for the synthetic next-available slot */
+  /** true for the API's "Just in time" slot */
   jit: boolean;
   /** ms since epoch for sorting; JIT sorts first */
   sortKey: number;
 };
 
 /**
- * WebinarJam schedule dates look like "2026-07-20 22:23" and are expressed in
- * the webinar's own timezone (details.timezone, e.g. "America/New_York").
- * We build a real Date for that wall-clock time in that zone, then render it in
- * the user's selected timezone.
+ * Compute the GMT offset string EverWebinar expects (e.g. "GMT+2", "GMT-7",
+ * "GMT+5:30") for an IANA timezone at the current instant. Mirrors the n8n
+ * expression `DateTime.fromFormat(...).toFormat("'GMT'Z")`.
  */
-function zonedWallClockToUtc(dateStr: string, sourceTz: string): Date | null {
-  const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
-  if (!m) return null;
-  const [, y, mo, d, h, mi] = m.map(Number) as unknown as number[];
-
-  // Interpret the wall-clock components as if they were UTC, then correct by
-  // the source zone's offset at that instant.
-  const asUtc = Date.UTC(y, mo - 1, d, h, mi);
-  const offset = tzOffsetMs(new Date(asUtc), sourceTz);
-  return new Date(asUtc - offset);
+export function gmtOffsetForTz(tz: string, at = new Date()): string {
+  const offsetMin = tzOffsetMinutes(at, tz);
+  const sign = offsetMin >= 0 ? "+" : "-";
+  const abs = Math.abs(offsetMin);
+  const hours = Math.floor(abs / 60);
+  const mins = abs % 60;
+  return mins === 0
+    ? `GMT${sign}${hours}`
+    : `GMT${sign}${hours}:${String(mins).padStart(2, "0")}`;
 }
 
-/** Offset (ms) of a timezone at a given instant: localZone - UTC. */
-function tzOffsetMs(date: Date, tz: string): number {
+/** Offset (minutes) of a timezone at a given instant: localZone - UTC. */
+function tzOffsetMinutes(date: Date, tz: string): number {
   try {
     const dtf = new Intl.DateTimeFormat("en-US", {
       timeZone: tz,
@@ -61,73 +62,78 @@ function tzOffsetMs(date: Date, tz: string): number {
       map.minute,
       map.second
     );
-    return asUtc - date.getTime();
+    return Math.round((asUtc - date.getTime()) / 60000);
   } catch {
     return 0;
   }
 }
 
-function formatInTz(date: Date, tz: string) {
-  const dateLabel = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
+/**
+ * Parse a localized "YYYY-MM-DD HH:mm" string into a sortable epoch. The value
+ * is already localized by the API, so we only need a monotonic key — parsing
+ * the components as UTC is sufficient for ordering.
+ */
+function parseSortKey(dateStr: string): number {
+  const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+  if (!m) return Number.MAX_SAFE_INTEGER;
+  const [, y, mo, d, h, mi] = m.map(Number) as unknown as number[];
+  return Date.UTC(y, mo - 1, d, h, mi);
+}
+
+/** Human-friendly labels from a localized "YYYY-MM-DD HH:mm" string. */
+function formatLocalized(dateStr: string): { label: string; sublabel: string } {
+  const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+  if (!m) return { label: dateStr, sublabel: "" };
+  const [, y, mo, d, h, mi] = m.map(Number) as unknown as number[];
+  // Build a UTC date purely for formatting the already-localized wall clock.
+  const dt = new Date(Date.UTC(y, mo - 1, d, h, mi));
+
+  const label = new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC",
     weekday: "short",
     month: "short",
     day: "numeric",
     year: "numeric",
-  }).format(date);
+  }).format(dt);
 
-  const timeLabel = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
+  const sublabel = new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC",
     hour: "numeric",
     minute: "2-digit",
-    timeZoneName: "short",
-  }).format(date);
+  }).format(dt);
 
-  return { dateLabel, timeLabel };
+  return { label, sublabel };
 }
 
 /**
- * Build the "Just In Time" slot: the next quarter-hour boundary at least ~5
- * minutes out, so a registrant always has a session about to start.
+ * Convert API schedules (already localized to the user's GMT offset) into
+ * sorted UI options. The API repeats recurring schedule ids across days, so
+ * each option is keyed by id+date to keep instances distinct. The "Just in
+ * time" entry is flagged and sorted first.
  */
-export function buildJitOption(tz: string, now = new Date()): ScheduleOption {
-  const target = new Date(now.getTime());
-  target.setSeconds(0, 0);
-  const step = 15;
-  const minutes = target.getMinutes();
-  let next = Math.ceil((minutes + 5) / step) * step;
-  target.setMinutes(next);
-
-  const { timeLabel } = formatInTz(target, tz);
-  return {
-    id: "jit",
-    label: "Just In Time — starts soon",
-    sublabel: `Next session at ${timeLabel}`,
-    jit: true,
-    sortKey: 0,
-  };
-}
-
-/** Convert real WebinarJam schedules into localized, sorted options. */
 export function buildScheduleOptions(
-  schedules: WebinarSchedule[],
-  sourceTz: string,
-  userTz: string
+  schedules: WebinarSchedule[]
 ): ScheduleOption[] {
   const opts: ScheduleOption[] = [];
+  const seen = new Set<string>();
+
   for (const s of schedules) {
-    const utc = zonedWallClockToUtc(s.date, sourceTz);
-    if (!utc) continue;
-    const { dateLabel, timeLabel } = formatInTz(utc, userTz);
-    const isRightNow = /right now/i.test(s.comment || "");
+    const isJit = /just in time/i.test(s.comment || "");
+    const key = `${s.schedule}|${s.date}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const { label, sublabel } = formatLocalized(s.date);
     opts.push({
       id: String(s.schedule),
-      label: isRightNow ? "Live Now" : dateLabel,
-      sublabel: isRightNow ? "Join the ongoing session" : timeLabel,
-      jit: false,
-      sortKey: utc.getTime(),
+      date: s.date,
+      label: isJit ? "Just In Time — starts now" : label,
+      sublabel: isJit ? "Jump into the next session" : sublabel,
+      jit: isJit,
+      sortKey: isJit ? 0 : parseSortKey(s.date),
     });
   }
+
   opts.sort((a, b) => a.sortKey - b.sortKey);
   return opts;
 }
