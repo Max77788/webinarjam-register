@@ -328,7 +328,7 @@ export function RegistrationForm() {
               Reserving your seat…
             </>
           ) : (
-            "Reserve my seat"
+            "Create the Joining Link"
           )}
         </button>
         <p className="text-center text-xs text-slate-400">
