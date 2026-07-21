@@ -137,8 +137,8 @@ export function RegistrationForm() {
           first_name: firstName,
           last_name: lastName,
           email,
-          phone_country_code: countryCode,
-          phone,
+          phone_country_code: phone.trim() ? countryCode : undefined,
+          phone: phone.trim() || undefined,
           schedule: chosen.id,
           date: chosen.date,
           timezone: gmtOffset,
@@ -188,6 +188,7 @@ export function RegistrationForm() {
               onChange={(e) => setFirstName(e.target.value)}
               placeholder="Jane"
               autoComplete="given-name"
+              required
               className={inputCls}
             />
           </Field>
@@ -197,6 +198,7 @@ export function RegistrationForm() {
               onChange={(e) => setLastName(e.target.value)}
               placeholder="Doe"
               autoComplete="family-name"
+              required
               className={inputCls}
             />
           </Field>
@@ -209,11 +211,12 @@ export function RegistrationForm() {
             onChange={(e) => setEmail(e.target.value)}
             placeholder="jane@example.com"
             autoComplete="email"
+            required
             className={inputCls}
           />
         </Field>
 
-        <Field label="Phone number" icon={<Phone className="h-4 w-4" />}>
+        <Field label="Phone number (optional)" icon={<Phone className="h-4 w-4" />}>
           <div className="flex gap-2">
             <select
               value={countryCode}
