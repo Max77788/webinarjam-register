@@ -12,11 +12,12 @@
  * EverWebinar expects application/x-www-form-urlencoded bodies and the api_key
  * as a query-string parameter (httpQueryAuth). Both are handled below.
  *
- * KEY BEHAVIOUR: when you pass `timezone` as a GMT offset (e.g. "GMT+2",
- * "GMT+5:30") to /webinar, the API returns every schedule date already
- * localized to that offset AND injects a synthetic "Just in time" slot
- * (schedule id 5) whose date is the next imminent start. So the client does
- * NOT compute timezones or JIT itself — the API does both.
+ * KEY BEHAVIOUR:
+ * - Passing `timezone` as a GMT offset (e.g. "GMT+2", "GMT+5:30") makes
+ *   EverWebinar return every schedule date already localized to that offset.
+ * - The native "Just in time" slot (schedule id 5) is only present when
+ *   /webinar is called WITHOUT a timezone. getWebinarDetails() dual-fetches
+ *   and merges that slot into the localized list so the UI always has it.
  */
 
 const API_BASE = "https://api.webinarjam.com/everwebinar";
@@ -145,22 +146,46 @@ async function post<T>(path: string, params: Record<string, string>): Promise<T>
 
 /**
  * Fetch webinar details. When `gmtOffset` (e.g. "GMT+2") is supplied, the API
- * localizes all schedule dates to it and adds the native "Just in time" slot.
+ * localizes all schedule dates to it. The native "Just in time" slot only
+ * appears on the unlocalized call, so we dual-fetch and merge it in.
  */
 export async function getWebinarDetails(
   gmtOffset?: string
 ): Promise<WebinarDetails> {
-  const params: Record<string, string> = {
+  // Lazy import keeps the webinarjam module free of circular deps at load time
+  // if schedule helpers grow further.
+  const { mergeJustInTimeSchedule } = await import("@/lib/schedule");
+
+  const baseParams: Record<string, string> = {
     api_key: getApiKey(),
     webinar_id: getWebinarId(),
   };
-  if (gmtOffset) params.timezone = gmtOffset;
 
-  const data = await post<{ status: string; webinar: WebinarDetails }>(
-    "webinar",
-    params
-  );
-  return data.webinar;
+  if (!gmtOffset) {
+    const data = await post<{ status: string; webinar: WebinarDetails }>(
+      "webinar",
+      baseParams
+    );
+    return data.webinar;
+  }
+
+  const localizedParams = { ...baseParams, timezone: gmtOffset };
+  const [localizedData, baseData] = await Promise.all([
+    post<{ status: string; webinar: WebinarDetails }>("webinar", localizedParams),
+    post<{ status: string; webinar: WebinarDetails }>("webinar", baseParams),
+  ]);
+
+  const localized = localizedData.webinar;
+  const base = baseData.webinar;
+  return {
+    ...localized,
+    schedules: mergeJustInTimeSchedule(
+      localized.schedules || [],
+      base.schedules || [],
+      base.timezone || localized.timezone || "UTC",
+      gmtOffset
+    ),
+  };
 }
 
 export type Registrant = {

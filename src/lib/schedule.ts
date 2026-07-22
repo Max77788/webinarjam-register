@@ -54,6 +54,8 @@ function tzOffsetMinutes(date: Date, tz: string): number {
     for (const p of parts) {
       if (p.type !== "literal") map[p.type] = Number(p.value);
     }
+    // Intl may return hour "24" for midnight; normalize.
+    if (map.hour === 24) map.hour = 0;
     const asUtc = Date.UTC(
       map.year,
       map.month - 1,
@@ -66,6 +68,104 @@ function tzOffsetMinutes(date: Date, tz: string): number {
   } catch {
     return 0;
   }
+}
+
+/** Parse "GMT+2" / "GMT-5:30" into minutes east of UTC. */
+export function parseGmtOffsetMinutes(gmt: string): number | null {
+  const m = gmt.trim().match(/^GMT([+-])(\d{1,2})(?::(\d{2}))?$/i);
+  if (!m) return null;
+  const sign = m[1] === "-" ? -1 : 1;
+  const hours = Number(m[2]);
+  const mins = Number(m[3] || "0");
+  if (!Number.isFinite(hours) || !Number.isFinite(mins) || mins >= 60) return null;
+  return sign * (hours * 60 + mins);
+}
+
+function parseWallParts(dateStr: string): {
+  y: number;
+  mo: number;
+  d: number;
+  h: number;
+  mi: number;
+} | null {
+  const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+  if (!m) return null;
+  return {
+    y: Number(m[1]),
+    mo: Number(m[2]),
+    d: Number(m[3]),
+    h: Number(m[4]),
+    mi: Number(m[5]),
+  };
+}
+
+/**
+ * Convert a wall-clock "YYYY-MM-DD HH:mm" from an IANA zone into the same
+ * instant expressed as a wall clock under a GMT±H[:MM] offset.
+ */
+export function convertWallClockToGmtOffset(
+  dateStr: string,
+  sourceTz: string,
+  targetGmt: string
+): string {
+  const parts = parseWallParts(dateStr);
+  const targetOffset = parseGmtOffsetMinutes(targetGmt);
+  if (!parts || targetOffset == null) return dateStr;
+
+  // Resolve the UTC instant for this wall time in the source zone.
+  let utcMs = Date.UTC(parts.y, parts.mo - 1, parts.d, parts.h, parts.mi);
+  for (let i = 0; i < 3; i++) {
+    const offsetMin = tzOffsetMinutes(new Date(utcMs), sourceTz);
+    utcMs =
+      Date.UTC(parts.y, parts.mo - 1, parts.d, parts.h, parts.mi) -
+      offsetMin * 60000;
+  }
+
+  const local = new Date(utcMs + targetOffset * 60000);
+  const y = local.getUTCFullYear();
+  const mo = String(local.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(local.getUTCDate()).padStart(2, "0");
+  const h = String(local.getUTCHours()).padStart(2, "0");
+  const mi = String(local.getUTCMinutes()).padStart(2, "0");
+  return `${y}-${mo}-${d} ${h}:${mi}`;
+}
+
+function isJustInTimeSchedule(s: WebinarSchedule): boolean {
+  return /just in time/i.test(s.comment || "") || Number(s.schedule) === 5;
+}
+
+/**
+ * EverWebinar only injects the native "Just in time" slot when /webinar is
+ * called WITHOUT a timezone. Localized fetches (timezone=GMT±H) drop it.
+ * Merge the base JIT entry into the localized list and re-express its date
+ * under the caller's GMT offset so the UI always has a real schedule id 5.
+ */
+export function mergeJustInTimeSchedule(
+  localizedSchedules: WebinarSchedule[],
+  baseSchedules: WebinarSchedule[],
+  baseTimezone: string,
+  targetGmt?: string
+): WebinarSchedule[] {
+  if ((localizedSchedules || []).some(isJustInTimeSchedule)) {
+    return localizedSchedules;
+  }
+
+  const jit = (baseSchedules || []).find(isJustInTimeSchedule);
+  if (!jit) return localizedSchedules;
+
+  let date = jit.date;
+  if (targetGmt && baseTimezone) {
+    date = convertWallClockToGmtOffset(jit.date, baseTimezone, targetGmt);
+  }
+
+  return [
+    {
+      schedule: jit.schedule,
+      comment: jit.comment || "Just in time",
+      date,
+    },
+    ...localizedSchedules,
+  ];
 }
 
 /**
